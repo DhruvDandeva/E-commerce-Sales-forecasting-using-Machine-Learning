@@ -1,0 +1,169 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.linear_model import LinearRegression
+from sklearn.svm import SVR
+from xgboost import XGBRegressor
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Conv1D, MaxPooling1D, Flatten
+from sklearn.metrics import r2_score, mean_absolute_percentage_error
+import time
+import warnings
+warnings.filterwarnings('ignore')
+
+# Load the dataset
+df = pd.read_csv('test_sales.csv.csv')
+
+# Function to prepare data for traditional ML models
+def prepare_data_ml(data, look_back=3):
+    X, y = [], []
+    for i in range(len(data) - look_back):
+        X.append(data[i:i + look_back])
+        y.append(data[i + look_back])
+    return np.array(X), np.array(y)
+
+# Function to prepare data for LSTM/CNN
+def prepare_data_dl(data, look_back=3):
+    X, y = prepare_data_ml(data, look_back)
+    return X.reshape(X.shape[0], X.shape[1], 1), y
+
+# Create models
+def create_models():
+    models = {
+        'Linear Regression': LinearRegression(),
+        'XGBoost': XGBRegressor(n_estimators=100, learning_rate=0.1),
+        'SVM': SVR(kernel='rbf'),
+        'LSTM': Sequential([
+            LSTM(50, return_sequences=True, input_shape=(3, 1)),
+            LSTM(50),
+            Dense(1)
+        ]),
+        'CNN': Sequential([
+            Conv1D(filters=64, kernel_size=2, activation='relu', input_shape=(3, 1)),
+            MaxPooling1D(pool_size=2),
+            Flatten(),
+            Dense(50, activation='relu'),
+            Dense(1)
+        ])
+    }
+
+    # Compile deep learning models
+    models['LSTM'].compile(optimizer='adam', loss='mse')
+    models['CNN'].compile(optimizer='adam', loss='mse')
+
+    return models
+
+# Function to calculate accuracy
+def calculate_accuracy(y_true, y_pred):
+    mape = mean_absolute_percentage_error(y_true, y_pred)
+    accuracy = 100 * (1 - mape)
+    r2 = r2_score(y_true, y_pred)
+    return accuracy, r2
+
+# Function to train and evaluate models
+def train_and_evaluate(data, column_name):
+    # Scale data
+    scaler = MinMaxScaler()
+    scaled_data = scaler.fit_transform(data.reshape(-1, 1)).flatten()
+
+    # Prepare data
+    X_ml, y_ml = prepare_data_ml(scaled_data)
+    X_dl, y_dl = prepare_data_dl(scaled_data)
+
+    # Split data
+    train_size = int(len(X_ml) * 0.8)
+    X_train_ml, X_test_ml = X_ml[:train_size], X_ml[train_size:]
+    X_train_dl, X_test_dl = X_dl[:train_size], X_dl[train_size:]
+    y_train, y_test = y_ml[:train_size], y_ml[train_size:]
+
+    # Create models
+    models = create_models()
+    results = {}
+
+    print(f"\nTraining models for {column_name}:")
+
+    for name, model in models.items():
+        start_time = time.time()
+
+        try:
+            if name in ['LSTM', 'CNN']:
+                model.fit(X_train_dl, y_train, epochs=50, batch_size=32, verbose=0)
+                y_pred = model.predict(X_test_dl, verbose=0).flatten()
+            else:
+                model.fit(X_train_ml, y_train)
+                y_pred = model.predict(X_test_ml)
+
+            # Inverse transform predictions and actual values
+            y_test_inv = scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
+            y_pred_inv = scaler.inverse_transform(y_pred.reshape(-1, 1)).flatten()
+
+            # Calculate metrics
+            accuracy, r2 = calculate_accuracy(y_test_inv, y_pred_inv)
+            training_time = time.time() - start_time
+
+            results[name] = {
+                'Accuracy': accuracy,
+                'R2 Score': r2,
+                'Training Time': training_time
+            }
+
+            print(f"{name} - Accuracy: {accuracy:.2f}%, R2: {r2:.4f}, Time: {training_time:.2f}s")
+
+        except Exception as e:
+            print(f"Error training {name}: {str(e)}")
+            results[name] = {
+                'Accuracy': None,
+                'R2 Score': None,
+                'Training Time': None
+            }
+
+    return results
+
+# Create results DataFrame
+results_all = pd.DataFrame()
+
+# Train models for overall sales
+overall_data = df['Overall Sales'].values
+overall_results = train_and_evaluate(overall_data, 'Overall Sales')
+results_all['Overall Sales'] = pd.DataFrame(overall_results).T['Accuracy']
+
+# Train models for individual products
+product_columns = [col for col in df.columns if col.startswith('Product')]
+for product in product_columns:
+    product_data = df[product].values
+    product_results = train_and_evaluate(product_data, product)
+    results_all[product] = pd.DataFrame(product_results).T['Accuracy']
+
+# Display results table
+print("\nAccuracy Comparison Table (%):")
+print(results_all.round(2))
+
+# Calculate average accuracy across all products
+results_all['Average Accuracy'] = results_all[results_all.columns].mean(axis=1)
+print("\nAverage Model Accuracy Across All Products (%):")
+print(results_all['Average Accuracy'].round(2))
+
+# Visualize results
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+plt.figure(figsize=(12, 6))
+sns.heatmap(results_all.iloc[:, :-1], annot=True, fmt='.2f', cmap='YlOrRd')
+plt.title('Model Accuracy Comparison Across Products (%)')
+plt.ylabel('Model')
+plt.xlabel('Product')
+plt.tight_layout()
+plt.show()
+
+# Bar plot of average accuracy
+plt.figure(figsize=(10, 6))
+results_all['Average Accuracy'].plot(kind='bar')
+plt.title('Average Model Accuracy Across All Products')
+plt.ylabel('Accuracy (%)')
+plt.xlabel('Model')
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.show()
+
+# Save results to CSV
+results_all.round(2).to_csv('model_comparison_results.csv')
